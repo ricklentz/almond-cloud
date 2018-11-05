@@ -16,6 +16,7 @@ const passport = require('passport');
 
 const userUtils = require('../util/user');
 const model = require('../model/user');
+const oauthModel = require('../model/oauth2');
 const db = require('../util/db');
 const SendMail = require('../util/sendmail');
 
@@ -153,45 +154,41 @@ router.post('/subscribe', (req, res, next) => {
     }).catch(next);
 });
 
-function getProfile(req, res, pwError, profileError) {
-    return EngineManager.get().getEngine(req.user.id).then((engine) => {
-        return Promise.all([engine.devices.getDevice('thingengine-own-phone'),
-                            engine.devices.getDevice('thingengine-own-desktop')]);
-    }).then(([phone, desktop]) => {
-        return Promise.all([phone ? phone.state : undefined, desktop ? desktop.state : undefined]);
-    }).then(([phoneState, desktopState]) => {
-        var phone;
-        if (phoneState) {
-            phone = {
-                isConfigured: true,
-            };
-        } else {
-            phone = {
-                isConfigured: false,
-                qrcodeTarget: 'https://thingengine.stanford.edu/qrcode-cloud/' + req.user.cloud_id + '/'
-                    + req.user.auth_token
-            };
-        }
-        var desktop;
-        if (desktopState) {
-            desktop = {
-                isConfigured: true,
-            };
-        } else {
-            desktop = {
-                isConfigured: false,
-            };
-        }
+async function getProfile(req, res, pwError, profileError) {
+    const phone = {
+        isConfigured: false,
+        qrcodeTarget: 'https://thingengine.stanford.edu/qrcode-cloud/' + req.user.cloud_id + '/'
+            + req.user.auth_token
+    };
+    const desktop = {
+        isConfigured: false,
+    };
 
-        res.render('user_profile', { page_title: req._("Thingpedia - User Profile"),
-                                     csrfToken: req.csrfToken(),
-                                     pw_error: pwError,
-                                     profile_error: profileError,
-                                     phone: phone, desktop: desktop });
-    }).catch((e) => {
-        res.status(400).render('error', { page_title: req._("Thingpedia - Error"),
-                                          message: e });
+    try {
+        const engine = await EngineManager.get().getEngine(req.user.id);
+        const [phoneDev, desktopDev] = await Promise.all([
+            engine.devices.hasDevice('thingengine-own-phone'),
+            engine.devices.hasDevice('thingengine-own-desktop')
+        ]);
+        if (phoneDev)
+            phone.isConfigured = true;
+        if (desktopDev)
+            desktop.isConfigured = true;
+    } catch(e) {
+        // ignore error if the engine died
+    }
+
+    const oauth_permissions = await db.withClient((dbClient) => {
+        return oauthModel.getAllPermissionsOfUser(dbClient, req.user.cloud_id);
     });
+
+    res.render('user_profile', { page_title: req._("Thingpedia - User Profile"),
+                                 csrfToken: req.csrfToken(),
+                                 pw_error: pwError,
+                                 profile_error: profileError,
+                                 oauth_permissions,
+                                 phone: phone,
+                                 desktop: desktop });
 }
 
 router.get('/profile', userUtils.redirectLogIn, (req, res, next) => {
@@ -222,6 +219,14 @@ router.post('/profile', userUtils.requireLogIn, (req, res, next) => {
         return getProfile(req, res, undefined, undefined);
     }).catch((error) => {
         return getProfile(req, res, undefined, error);
+    }).catch(next);
+});
+
+router.post('/revoke-oauth2', userUtils.requireLogIn, (req, res, next) => {
+    return db.withTransaction((dbClient) => {
+        return oauthModel.revokePermission(dbClient, req.body.client_id, req.user.cloud_id);
+    }).then(() => {
+            res.redirect(303, '/user/profile');
     }).catch(next);
 });
 
